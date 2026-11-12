@@ -144,9 +144,15 @@
 
   function modeName(h) {
     if (!h) return "";
-    if (Number(h.game_mode) === 2) return "Street Brawl";
-    if (Number(h.match_mode) === 4) return "Ranked";
-    return "Normal";
+    var gm = Number(h.game_mode);
+    var mm = Number(h.match_mode);
+    if (gm === 4) return "Street Brawl";
+    if (mm === 4) return "Ranked";
+    if (gm === 1) return "Normal";
+    if (gm === 2) return "1v1";
+    if (gm === 3) return "Sandbox";
+    if (gm === 5) return "Explore";
+    return "Other";
   }
 
   function profile(me, id) {
