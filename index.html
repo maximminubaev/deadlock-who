@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>WHO|idle</title>
+<style>body{font:12px sans-serif;color:#ddd;background:#111}</style>
+</head>
+<body>
+<script>
+(function () {
+  "use strict";
+
+  var API = "https://api.deadlock-api.com/v1/players/";
+  var MODES = ["normal", "street_brawl"];
+  var TTL = 5 * 60 * 1000;
+  var LS_PREFIX = "who_cache_v2_";
+
+  var cache = null;
+  var cacheAt = 0;
+  var cacheMe = "";
+  var busy = false;
+  var pending = false;
+
+  function title(s) {
+    try { document.title = "WHO|" + s; } catch (e) { }
+  }
+
+  function parseHash() {
+    try {
+      var h = location.hash ? location.hash.slice(1) : "";
+      if (!h) return null;
+      return JSON.parse(decodeURIComponent(h));
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function loadCache(me) {
+    if (cache && cacheMe === me) return;
+    try {
+      var raw = localStorage.getItem(LS_PREFIX + me);
+      if (!raw) return;
+      var obj = JSON.parse(raw);
+      if (obj && typeof obj.at === "number" && Date.now() - obj.at < TTL) {
+        cache = obj.data;
+        cacheAt = obj.at;
+        cacheMe = me;
+      }
+    } catch (e) { }
+  }
+
+  function saveCache(me, data) {
+    cache = data;
+    cacheAt = Date.now();
+    cacheMe = me;
+    try { localStorage.setItem(LS_PREFIX + me, JSON.stringify({ at: cacheAt, data: data })); } catch (e) { }
+  }
+
+  function fetchJson(url) {
+    return fetch(url, { cache: "no-store" }).then(function (r) {
+      if (!r.ok) throw new Error("http " + r.status);
+      return r.json();
+    });
+  }
+
+  function load(me) {
+    loadCache(me);
+    if (cache && cacheMe === me) return Promise.resolve(cache);
+    title("loading");
+    var urls = [];
+    for (var i = 0; i < MODES.length; i++) {
+      var m = MODES[i];
+      urls.push(API + me + "/mate-stats?game_mode=" + m);
+      urls.push(API + me + "/enemy-stats?game_mode=" + m);
+    }
+    return Promise.all(urls.map(fetchJson)).then(function (res) {
+      var mates = {};
+      var enemies = {};
+      for (var k = 0; k < MODES.length; k++) {
+        var mres = res[k * 2] || [];
+        var eres = res[k * 2 + 1] || [];
+        for (var a = 0; a < mres.length; a++) {
+          var id = String(mres[a].mate_id);
+          if (!mates[id]) mates[id] = { m: 0, w: 0 };
+          mates[id].m += mres[a].matches_played || 0;
+          mates[id].w += mres[a].wins || 0;
+        }
+        for (var b = 0; b < eres.length; b++) {
+          var eid = String(eres[b].enemy_id);
+          if (!enemies[eid]) enemies[eid] = { e: 0, w: 0 };
+          enemies[eid].e += eres[b].matches_played || 0;
+          enemies[eid].w += eres[b].wins || 0;
+        }
+      }
+      var data = { mates: mates, enemies: enemies };
+      saveCache(me, data);
+      return data;
+    });
+  }
+
+  function respond() {
+    var q = parseHash();
+    if (!q || !q.me) { title("idle"); return; }
+    if (busy) { pending = true; return; }
+    busy = true;
+    pending = false;
+
+    load(String(q.me)).then(function (data) {
+      var out = [];
+      var list = q.players || [];
+      for (var i = 0; i < list.length; i++) {
+        var p = list[i] || {};
+        var id = String(p.id || "");
+        if (!id || id === String(q.me)) continue;
+        var m = data.mates[id];
+        var e = data.enemies[id];
+        if (!m && !e) continue;
+        out.push({
+          id: id,
+          n: String(p.n || ""),
+          m: m ? m.m : 0,
+          mw: m ? m.w : 0,
+          e: e ? e.e : 0
+        });
+      }
+      out.sort(function (x, y) { return (y.m + y.e) - (x.m + x.e); });
+      title(JSON.stringify({ t: Date.now(), me: String(q.me), list: out }));
+    }).catch(function (err) {
+      title(JSON.stringify({ t: Date.now(), err: String(err) }));
+    }).then(function () {
+      busy = false;
+      if (pending) respond();
+    });
+  }
+
+  window.addEventListener("hashchange", respond);
+  respond();
+})();
+</script>
+</body>
+</html>
