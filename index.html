@@ -190,7 +190,8 @@
           a: h ? Number(h.player_assists) || 0 : -1,
           yk: yh ? Number(yh.player_kills) || 0 : -1,
           yd: yh ? Number(yh.player_deaths) || 0 : -1,
-          ya: yh ? Number(yh.player_assists) || 0 : -1
+          ya: yh ? Number(yh.player_assists) || 0 : -1,
+          win: yh ? Number(yh.match_result) : -1
         });
       }
       return {
