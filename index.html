@@ -63,6 +63,15 @@
     });
   }
 
+  function withTimeout(promise, ms, fallback) {
+    return Promise.race([
+      promise,
+      new Promise(function (resolve) {
+        setTimeout(function () { resolve(fallback); }, ms);
+      })
+    ]);
+  }
+
   function loadStats(me) {
     if (statsCache && statsMe === me) return Promise.resolve(statsCache);
     var cached = readJson(STATS_PREFIX + me, STATS_TTL);
@@ -141,7 +150,11 @@
   }
 
   function profile(me, id) {
-    return Promise.all([loadStats(me), loadHeroes(), loadHistory(id).catch(function () { return {}; })]).then(function (all) {
+    return Promise.all([
+      loadStats(me),
+      withTimeout(loadHeroes().catch(function () { return {}; }), 5000, {}),
+      withTimeout(loadHistory(id).catch(function () { return {}; }), 6000, {})
+    ]).then(function (all) {
       var stats = all[0];
       var heroes = all[1];
       var hist = all[2];
@@ -180,6 +193,7 @@
   }
 
   function roster(me, players) {
+    loadHeroes().catch(function () { });
     return loadStats(me).then(function (stats) {
       var out = [];
       var list = players || [];
