@@ -153,11 +153,13 @@
     return Promise.all([
       loadStats(me),
       withTimeout(loadHeroes().catch(function () { return {}; }), 5000, {}),
-      withTimeout(loadHistory(id).catch(function () { return {}; }), 6000, {})
+      withTimeout(loadHistory(id).catch(function () { return {}; }), 6000, {}),
+      withTimeout(loadHistory(me).catch(function () { return {}; }), 6000, {})
     ]).then(function (all) {
       var stats = all[0];
       var heroes = all[1];
       var hist = all[2];
+      var myHist = all[3];
       var m = stats.mates[id];
       var e = stats.enemies[id];
       var shared = {};
@@ -176,6 +178,7 @@
       for (i = 0; i < ids.length && out.length < 3; i++) {
         var mid = ids[i];
         var h = hist[mid];
+        var yh = myHist[mid];
         out.push({
           mid: mid,
           hero: h && heroes[String(h.hero_id)] ? heroes[String(h.hero_id)] : "",
@@ -184,7 +187,10 @@
           side: shared[mid],
           k: h ? Number(h.player_kills) || 0 : -1,
           d: h ? Number(h.player_deaths) || 0 : -1,
-          a: h ? Number(h.player_assists) || 0 : -1
+          a: h ? Number(h.player_assists) || 0 : -1,
+          yk: yh ? Number(yh.player_kills) || 0 : -1,
+          yd: yh ? Number(yh.player_deaths) || 0 : -1,
+          ya: yh ? Number(yh.player_assists) || 0 : -1
         });
       }
       return {
