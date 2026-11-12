@@ -11,13 +11,18 @@
   "use strict";
 
   var API = "https://api.deadlock-api.com/v1/players/";
+  var MATCH_API = "https://api.deadlock-api.com/v1/matches/";
+  var ASSETS = "https://api.deadlock-api.com/v1/assets/heroes";
   var MODES = ["normal", "street_brawl"];
-  var TTL = 5 * 60 * 1000;
-  var LS_PREFIX = "who_cache_v2_";
+  var STATS_TTL = 5 * 60 * 1000;
+  var HIST_TTL = 10 * 60 * 1000;
+  var HERO_TTL = 24 * 60 * 60 * 1000;
+  var STATS_PREFIX = "who_stats_v3_";
+  var HIST_PREFIX = "who_hist_v3_";
+  var HERO_KEY = "who_heroes_v1";
 
-  var cache = null;
-  var cacheAt = 0;
-  var cacheMe = "";
+  var statsCache = null;
+  var statsMe = "";
   var busy = false;
   var pending = false;
 
@@ -35,25 +40,20 @@
     }
   }
 
-  function loadCache(me) {
-    if (cache && cacheMe === me) return;
+  function readJson(key, ttl) {
     try {
-      var raw = localStorage.getItem(LS_PREFIX + me);
-      if (!raw) return;
+      var raw = localStorage.getItem(key);
+      if (!raw) return null;
       var obj = JSON.parse(raw);
-      if (obj && typeof obj.at === "number" && Date.now() - obj.at < TTL) {
-        cache = obj.data;
-        cacheAt = obj.at;
-        cacheMe = me;
-      }
-    } catch (e) { }
+      if (!obj || typeof obj.at !== "number" || Date.now() - obj.at > ttl) return null;
+      return obj.data;
+    } catch (e) {
+      return null;
+    }
   }
 
-  function saveCache(me, data) {
-    cache = data;
-    cacheAt = Date.now();
-    cacheMe = me;
-    try { localStorage.setItem(LS_PREFIX + me, JSON.stringify({ at: cacheAt, data: data })); } catch (e) { }
+  function writeJson(key, data) {
+    try { localStorage.setItem(key, JSON.stringify({ at: Date.now(), data: data })); } catch (e) { }
   }
 
   function fetchJson(url) {
@@ -63,15 +63,18 @@
     });
   }
 
-  function load(me) {
-    loadCache(me);
-    if (cache && cacheMe === me) return Promise.resolve(cache);
-    title("loading");
+  function loadStats(me) {
+    if (statsCache && statsMe === me) return Promise.resolve(statsCache);
+    var cached = readJson(STATS_PREFIX + me, STATS_TTL);
+    if (cached) {
+      statsCache = cached;
+      statsMe = me;
+      return Promise.resolve(cached);
+    }
     var urls = [];
     for (var i = 0; i < MODES.length; i++) {
-      var m = MODES[i];
-      urls.push(API + me + "/mate-stats?game_mode=" + m);
-      urls.push(API + me + "/enemy-stats?game_mode=" + m);
+      urls.push(API + me + "/mate-stats?game_mode=" + MODES[i]);
+      urls.push(API + me + "/enemy-stats?game_mode=" + MODES[i]);
     }
     return Promise.all(urls.map(fetchJson)).then(function (res) {
       var mates = {};
@@ -81,39 +84,111 @@
         var eres = res[k * 2 + 1] || [];
         for (var a = 0; a < mres.length; a++) {
           var id = String(mres[a].mate_id);
-          if (!mates[id]) mates[id] = { m: 0, w: 0 };
+          if (!mates[id]) mates[id] = { m: 0, w: 0, matches: [] };
           mates[id].m += mres[a].matches_played || 0;
           mates[id].w += mres[a].wins || 0;
+          var mm = mres[a].matches || [];
+          for (var mi = 0; mi < mm.length; mi++) mates[id].matches.push(String(mm[mi]));
         }
         for (var b = 0; b < eres.length; b++) {
           var eid = String(eres[b].enemy_id);
-          if (!enemies[eid]) enemies[eid] = { e: 0, w: 0 };
+          if (!enemies[eid]) enemies[eid] = { e: 0, w: 0, matches: [] };
           enemies[eid].e += eres[b].matches_played || 0;
           enemies[eid].w += eres[b].wins || 0;
+          var em = eres[b].matches || [];
+          for (var ei = 0; ei < em.length; ei++) enemies[eid].matches.push(String(em[ei]));
         }
       }
       var data = { mates: mates, enemies: enemies };
-      saveCache(me, data);
+      writeJson(STATS_PREFIX + me, data);
+      statsCache = data;
+      statsMe = me;
       return data;
     });
   }
 
-  function respond() {
-    var q = parseHash();
-    if (!q || !q.me) { title("idle"); return; }
-    if (busy) { pending = true; return; }
-    busy = true;
-    pending = false;
+  function loadHeroes() {
+    var cached = readJson(HERO_KEY, HERO_TTL);
+    if (cached) return Promise.resolve(cached);
+    return fetchJson(ASSETS).then(function (list) {
+      var map = {};
+      for (var i = 0; i < list.length; i++) {
+        map[String(list[i].id)] = String(list[i].name || "");
+      }
+      writeJson(HERO_KEY, map);
+      return map;
+    });
+  }
 
-    load(String(q.me)).then(function (data) {
+  function loadHistory(id) {
+    var cached = readJson(HIST_PREFIX + id, HIST_TTL);
+    if (cached) return Promise.resolve(cached);
+    return fetchJson(API + id + "/match-history").then(function (list) {
+      var map = {};
+      for (var i = 0; i < list.length; i++) {
+        map[String(list[i].match_id)] = list[i];
+      }
+      writeJson(HIST_PREFIX + id, map);
+      return map;
+    });
+  }
+
+  function modeName(h) {
+    if (!h) return "";
+    if (Number(h.game_mode) === 2) return "Street Brawl";
+    if (Number(h.match_mode) === 4) return "Ranked";
+    return "Normal";
+  }
+
+  function profile(me, id) {
+    return Promise.all([loadStats(me), loadHeroes(), loadHistory(id).catch(function () { return {}; })]).then(function (all) {
+      var stats = all[0];
+      var heroes = all[1];
+      var hist = all[2];
+      var m = stats.mates[id];
+      var e = stats.enemies[id];
+      var shared = {};
+      var i;
+      if (m && m.matches) {
+        for (i = 0; i < m.matches.length; i++) shared[m.matches[i]] = "with";
+      }
+      if (e && e.matches) {
+        for (i = 0; i < e.matches.length; i++) {
+          if (!shared[e.matches[i]]) shared[e.matches[i]] = "vs";
+        }
+      }
+      var ids = Object.keys(shared);
+      ids.sort(function (a, b) { return Number(b) - Number(a); });
       var out = [];
-      var list = q.players || [];
+      for (i = 0; i < ids.length && out.length < 3; i++) {
+        var mid = ids[i];
+        var h = hist[mid];
+        out.push({
+          mid: mid,
+          hero: h && heroes[String(h.hero_id)] ? heroes[String(h.hero_id)] : "",
+          time: h ? Number(h.start_time) || 0 : 0,
+          mode: modeName(h),
+          side: shared[mid]
+        });
+      }
+      return {
+        m: m ? m.m : 0,
+        e: e ? e.e : 0,
+        list: out
+      };
+    });
+  }
+
+  function roster(me, players) {
+    return loadStats(me).then(function (stats) {
+      var out = [];
+      var list = players || [];
       for (var i = 0; i < list.length; i++) {
         var p = list[i] || {};
         var id = String(p.id || "");
-        if (!id || id === String(q.me)) continue;
-        var m = data.mates[id];
-        var e = data.enemies[id];
+        if (!id || id === String(me)) continue;
+        var m = stats.mates[id];
+        var e = stats.enemies[id];
         if (!m && !e) continue;
         out.push({
           id: id,
@@ -124,9 +199,34 @@
         });
       }
       out.sort(function (x, y) { return (y.m + y.e) - (x.m + x.e); });
-      title(JSON.stringify({ t: Date.now(), me: String(q.me), list: out }));
+      return out;
+    });
+  }
+
+  function respond() {
+    var q = parseHash();
+    if (!q || !q.q) { title("idle"); return; }
+    if (busy) { pending = true; return; }
+    busy = true;
+    pending = false;
+
+    var rid = q.rid || 0;
+    var work;
+    if (q.q === "profile") {
+      work = profile(String(q.me || ""), String(q.id || "")).then(function (data) {
+        return { q: "profile", rid: rid, id: String(q.id || ""), m: data.m, e: data.e, list: data.list };
+      });
+    } else {
+      work = roster(String(q.me || ""), q.players).then(function (list) {
+        return { q: "roster", rid: rid, me: String(q.me || ""), list: list };
+      });
+    }
+
+    work.then(function (payload) {
+      payload.t = Date.now();
+      title(JSON.stringify(payload));
     }).catch(function (err) {
-      title(JSON.stringify({ t: Date.now(), err: String(err) }));
+      title(JSON.stringify({ q: q.q, rid: rid, t: Date.now(), err: String(err) }));
     }).then(function () {
       busy = false;
       if (pending) respond();
