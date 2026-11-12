@@ -181,12 +181,17 @@
           hero: h && heroes[String(h.hero_id)] ? heroes[String(h.hero_id)] : "",
           time: h ? Number(h.start_time) || 0 : 0,
           mode: modeName(h),
-          side: shared[mid]
+          side: shared[mid],
+          k: h ? Number(h.player_kills) || 0 : -1,
+          d: h ? Number(h.player_deaths) || 0 : -1,
+          a: h ? Number(h.player_assists) || 0 : -1
         });
       }
       return {
         m: m ? m.m : 0,
         e: e ? e.e : 0,
+        mw: m ? m.w : 0,
+        ew: e ? e.w : 0,
         list: out
       };
     });
@@ -209,7 +214,8 @@
           n: String(p.n || ""),
           m: m ? m.m : 0,
           mw: m ? m.w : 0,
-          e: e ? e.e : 0
+          e: e ? e.e : 0,
+          ew: e ? e.w : 0
         });
       }
       out.sort(function (x, y) { return (y.m + y.e) - (x.m + x.e); });
@@ -228,7 +234,7 @@
     var work;
     if (q.q === "profile") {
       work = profile(String(q.me || ""), String(q.id || "")).then(function (data) {
-        return { q: "profile", rid: rid, id: String(q.id || ""), m: data.m, e: data.e, list: data.list };
+        return { q: "profile", rid: rid, id: String(q.id || ""), m: data.m, e: data.e, mw: data.mw, ew: data.ew, list: data.list };
       });
     } else {
       work = roster(String(q.me || ""), q.players).then(function (list) {
