@@ -148,6 +148,12 @@
     var mm = Number(h.match_mode);
     if (gm === 4) return "Street Brawl";
     if (mm === 4) return "Ranked";
+    if (mm === 3) return "Coop Bot";
+    if (mm === 2) return "Private";
+    if (mm === 5) return "Server Test";
+    if (mm === 6) return "Tutorial";
+    if (mm === 7) return "Hero Labs";
+    if (mm === 8) return "New Player";
     if (gm === 1) return "Normal";
     if (gm === 2) return "1v1";
     if (gm === 3) return "Sandbox";
