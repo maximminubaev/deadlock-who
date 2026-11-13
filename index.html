@@ -14,12 +14,15 @@
   var MATCH_API = "https://api.deadlock-api.com/v1/matches/";
   var ASSETS = "https://api.deadlock-api.com/v1/assets/heroes";
   var MODES = ["normal", "street_brawl"];
-  var STATS_TTL = 5 * 60 * 1000;
+  var STATS_TTL = 2 * 60 * 1000;
   var HIST_TTL = 10 * 60 * 1000;
   var HERO_TTL = 24 * 60 * 60 * 1000;
   var STATS_PREFIX = "who_stats_v3_";
   var HIST_PREFIX = "who_hist_v3_";
   var HERO_KEY = "who_heroes_v1";
+  var ROSTER_PREFIX = "who_rosters_v2_";
+  var ROSTER_TTL = 24 * 60 * 60 * 1000;
+  var ROSTER_MAX = 15;
 
   var statsCache = null;
   var statsMe = "";
@@ -56,6 +59,45 @@
     try { localStorage.setItem(key, JSON.stringify({ at: Date.now(), data: data })); } catch (e) { }
   }
 
+  function loadRosters(me) {
+    return readJson(ROSTER_PREFIX + me, ROSTER_TTL) || [];
+  }
+
+  function saveRosters(me, list) {
+    writeJson(ROSTER_PREFIX + me, list.slice(-ROSTER_MAX));
+  }
+
+  function sameSet(a, b) {
+    if (!a || !b || a.length !== b.length) return false;
+    var sa = a.slice().sort();
+    var sb = b.slice().sort();
+    for (var i = 0; i < sa.length; i++) {
+      if (sa[i] !== sb[i]) return false;
+    }
+    return true;
+  }
+
+  function isSubset(a, b) {
+    if (!a || !b) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (b.indexOf(a[i]) < 0) return false;
+    }
+    return true;
+  }
+
+  function uniqueIds(players) {
+    var seen = {};
+    var out = [];
+    var list = players || [];
+    for (var i = 0; i < list.length; i++) {
+      var id = String((list[i] && list[i].id) || "");
+      if (!id || seen[id]) continue;
+      seen[id] = true;
+      out.push(id);
+    }
+    return out;
+  }
+
   function fetchJson(url) {
     return fetch(url, { cache: "no-store" }).then(function (r) {
       if (!r.ok) throw new Error("http " + r.status);
@@ -72,13 +114,15 @@
     ]);
   }
 
-  function loadStats(me) {
-    if (statsCache && statsMe === me) return Promise.resolve(statsCache);
-    var cached = readJson(STATS_PREFIX + me, STATS_TTL);
-    if (cached) {
-      statsCache = cached;
-      statsMe = me;
-      return Promise.resolve(cached);
+  function loadStats(me, force) {
+    if (!force && statsCache && statsMe === me) return Promise.resolve(statsCache);
+    if (!force) {
+      var cached = readJson(STATS_PREFIX + me, STATS_TTL);
+      if (cached) {
+        statsCache = cached;
+        statsMe = me;
+        return Promise.resolve(cached);
+      }
     }
     var urls = [];
     for (var i = 0; i < MODES.length; i++) {
@@ -206,20 +250,28 @@
           win: yh ? Number(yh.match_result) : -1
         });
       }
+      var rosters = loadRosters(me);
+      var prev = rosters.slice(0, -1);
+      var local = 0;
+      for (var r = 0; r < prev.length; r++) {
+        if (prev[r].ids && prev[r].ids.indexOf(String(id)) >= 0) local += 1;
+      }
       return {
         m: m ? m.m : 0,
         e: e ? e.e : 0,
         mw: m ? m.w : 0,
         ew: e ? e.w : 0,
+        local: local,
         list: out
       };
     });
   }
 
-  function roster(me, players) {
+  function roster(me, players, fresh) {
     loadHeroes().catch(function () { });
-    return loadStats(me).then(function (stats) {
+    return loadStats(me, !!fresh).then(function (stats) {
       var out = [];
+      var byId = {};
       var list = players || [];
       for (var i = 0; i < list.length; i++) {
         var p = list[i] || {};
@@ -228,15 +280,70 @@
         var m = stats.mates[id];
         var e = stats.enemies[id];
         if (!m && !e) continue;
-        out.push({
+        var entry = {
           id: id,
           n: String(p.n || ""),
           m: m ? m.m : 0,
           mw: m ? m.w : 0,
           e: e ? e.e : 0,
           ew: e ? e.w : 0
-        });
+        };
+        out.push(entry);
+        byId[id] = entry;
       }
+
+      var ids = uniqueIds(players);
+      if (ids.length >= 8) {
+        var rosters = loadRosters(me);
+        var last = rosters.length ? rosters[rosters.length - 1] : null;
+        var now = Date.now();
+        var same = last && sameSet(ids, last.ids);
+        var sub = last && isSubset(ids, last.ids);
+        var sup = last && isSubset(last.ids, ids);
+        var sameMatch = !!(last && (same || sub || (sup && now - last.at < 3 * 60 * 1000)));
+        var prev = sameMatch ? rosters.slice(0, -1) : rosters.slice();
+        var counts = {};
+        for (var r = 0; r < prev.length; r++) {
+          var rids = prev[r].ids || [];
+          for (var j = 0; j < rids.length; j++) {
+            var rid = String(rids[j]);
+            if (rid === String(me)) continue;
+            if (ids.indexOf(rid) >= 0) counts[rid] = (counts[rid] || 0) + 1;
+          }
+        }
+        for (var cid in counts) {
+          var cnt = counts[cid];
+          if (byId[cid]) {
+            byId[cid].recent = true;
+            byId[cid].recentCount = cnt;
+          } else {
+            var pname = "";
+            for (var k = 0; k < list.length; k++) {
+              if (String((list[k] && list[k].id) || "") === cid) pname = String(list[k].n || "");
+            }
+            out.push({
+              id: cid,
+              n: pname,
+              m: cnt,
+              mw: -1,
+              e: 0,
+              ew: 0,
+              recent: true,
+              recentCount: cnt
+            });
+          }
+        }
+        if (sameMatch) {
+          for (var u = 0; u < ids.length; u++) {
+            if (last.ids.indexOf(ids[u]) < 0) last.ids.push(ids[u]);
+          }
+          last.at = now;
+        } else {
+          rosters.push({ at: now, ids: ids });
+        }
+        saveRosters(me, rosters);
+      }
+
       out.sort(function (x, y) { return (y.m + y.e) - (x.m + x.e); });
       return out;
     });
@@ -253,10 +360,10 @@
     var work;
     if (q.q === "profile") {
       work = profile(String(q.me || ""), String(q.id || "")).then(function (data) {
-        return { q: "profile", rid: rid, id: String(q.id || ""), m: data.m, e: data.e, mw: data.mw, ew: data.ew, list: data.list };
+        return { q: "profile", rid: rid, id: String(q.id || ""), m: data.m, e: data.e, mw: data.mw, ew: data.ew, local: data.local, list: data.list };
       });
     } else {
-      work = roster(String(q.me || ""), q.players).then(function (list) {
+      work = roster(String(q.me || ""), q.players, q.fresh).then(function (list) {
         return { q: "roster", rid: rid, me: String(q.me || ""), list: list };
       });
     }
