@@ -173,9 +173,11 @@
     });
   }
 
-  function loadHistory(id) {
-    var cached = readJson(HIST_PREFIX + id, HIST_TTL);
-    if (cached) return Promise.resolve(cached);
+  function loadHistory(id, force) {
+    if (!force) {
+      var cached = readJson(HIST_PREFIX + id, HIST_TTL);
+      if (cached) return Promise.resolve(cached);
+    }
     return fetchJson(API + id + "/match-history").then(function (list) {
       var map = {};
       for (var i = 0; i < list.length; i++) {
@@ -267,6 +269,47 @@
     });
   }
 
+  function bestShared(stats, id) {
+    var m = stats.mates[id];
+    var e = stats.enemies[id];
+    var best = 0;
+    var side = "";
+    function consider(list, kind) {
+      if (!list) return;
+      for (var i = 0; i < list.length; i++) {
+        var mid = Number(list[i]) || 0;
+        if (mid > best) {
+          best = mid;
+          side = kind;
+        }
+      }
+    }
+    consider(m && m.matches, "with");
+    consider(e && e.matches, "vs");
+    if (!best) return null;
+    return { mid: String(best), side: side };
+  }
+
+  function lastShared(stats, id, hist, myHist, heroes) {
+    var best = bestShared(stats, id);
+    if (!best) return null;
+    var mid = best.mid;
+    var side = best.side;
+    var h = hist[mid];
+    var yh = myHist[mid];
+    return {
+      mid: mid,
+      side: side,
+      hero: h && heroes[String(h.hero_id)] ? heroes[String(h.hero_id)] : "",
+      k: h ? Number(h.player_kills) || 0 : -1,
+      d: h ? Number(h.player_deaths) || 0 : -1,
+      a: h ? Number(h.player_assists) || 0 : -1,
+      win: yh ? Number(yh.match_result) : -1,
+      time: h ? Number(h.start_time) || 0 : 0,
+      mode: modeName(h)
+    };
+  }
+
   function roster(me, players, fresh) {
     loadHeroes().catch(function () { });
     return loadStats(me, !!fresh).then(function (stats) {
@@ -345,7 +388,28 @@
       }
 
       out.sort(function (x, y) { return (y.m + y.e) - (x.m + x.e); });
-      return out;
+
+      var top = out.slice(0, 6);
+      if (!top.length) return out;
+      return Promise.all([
+        withTimeout(loadHistory(me, !!fresh).catch(function () { return {}; }), 8000, {}),
+        withTimeout(loadHeroes().catch(function () { return {}; }), 8000, {})
+      ]).then(function (base) {
+        var myHist = base[0] || {};
+        var heroes = base[1] || {};
+        return Promise.all(top.map(function (entry) {
+          var best = bestShared(stats, entry.id);
+          return withTimeout(loadHistory(entry.id).catch(function () { return {}; }), 8000, {})
+            .then(function (hist) {
+              if (best && hist[best.mid]) return hist;
+              return loadHistory(entry.id, true).catch(function () { return hist || {}; });
+            })
+            .then(function (hist) {
+              var last = lastShared(stats, entry.id, hist || {}, myHist, heroes);
+              if (last) entry.last = last;
+            });
+        })).then(function () { return out; });
+      });
     });
   }
 
