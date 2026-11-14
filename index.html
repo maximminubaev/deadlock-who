@@ -15,10 +15,12 @@
   var ASSETS = "https://api.deadlock-api.com/v1/assets/heroes";
   var MODES = ["normal", "street_brawl"];
   var STATS_TTL = 2 * 60 * 1000;
-  var HIST_TTL = 10 * 60 * 1000;
   var HERO_TTL = 24 * 60 * 60 * 1000;
+  var META_TTL = 7 * 24 * 60 * 60 * 1000;
+  var SESSION_TTL = 10 * 60 * 1000;
   var STATS_PREFIX = "who_stats_v3_";
-  var HIST_PREFIX = "who_hist_v3_";
+  var META_PREFIX = "who_meta_v1_";
+  var SESSION_KEY = "who_session_roster_v1";
   var HERO_KEY = "who_heroes_v1";
   var ROSTER_PREFIX = "who_rosters_v2_";
   var ROSTER_TTL = 24 * 60 * 60 * 1000;
@@ -173,51 +175,89 @@
     });
   }
 
-  function loadHistory(id, force) {
-    if (!force) {
-      var cached = readJson(HIST_PREFIX + id, HIST_TTL);
-      if (cached) return Promise.resolve(cached);
+  function loadMetadata(ids) {
+    var out = {};
+    var missing = [];
+    for (var i = 0; i < ids.length; i++) {
+      var id = String(ids[i]);
+      var cached = readJson(META_PREFIX + id, META_TTL);
+      if (cached) out[id] = cached;
+      else missing.push(id);
     }
-    return fetchJson(API + id + "/match-history").then(function (list) {
-      var map = {};
-      for (var i = 0; i < list.length; i++) {
-        map[String(list[i].match_id)] = list[i];
+    if (!missing.length) return Promise.resolve(out);
+    var url = MATCH_API + "metadata?match_ids=" + missing.join(",") + "&include_player_kda=true";
+    return fetchJson(url).then(function (list) {
+      for (var j = 0; j < list.length; j++) {
+        var m = list[j];
+        var mid = String(m.match_id);
+        out[mid] = m;
+        writeJson(META_PREFIX + mid, m);
       }
-      writeJson(HIST_PREFIX + id, map);
-      return map;
+      return out;
     });
   }
 
-  function modeName(h) {
-    if (!h) return "";
-    var gm = Number(h.game_mode);
-    var mm = Number(h.match_mode);
-    if (gm === 4) return "Street Brawl";
-    if (mm === 4) return "Ranked";
-    if (mm === 3) return "Coop Bot";
-    if (mm === 2) return "Private";
-    if (mm === 5) return "Server Test";
-    if (mm === 6) return "Tutorial";
-    if (mm === 7) return "Hero Labs";
-    if (mm === 8) return "New Player";
-    if (gm === 1) return "Normal";
-    if (gm === 2) return "1v1";
-    if (gm === 3) return "Sandbox";
-    if (gm === 5) return "Explore";
-    return "Other";
+  function metaMode(m) {
+    if (!m) return "";
+    var gm = String(m.game_mode || "");
+    var mm = String(m.match_mode || "");
+    if (gm === "Street Brawl") return "Street Brawl";
+    if (mm === "Ranked") return "Ranked";
+    if (mm === "Unranked") return "Normal";
+    if (gm === "Normal") return "Normal";
+    return mm || gm || "";
+  }
+
+  function metaTime(m) {
+    if (!m) return 0;
+    var v = m.start_time;
+    if (typeof v === "number") return v;
+    var s = String(v || "");
+    if (!s) return 0;
+    var parsed = Date.parse(s.indexOf("T") >= 0 ? s : s.replace(" ", "T") + "Z");
+    return isNaN(parsed) ? 0 : Math.floor(parsed / 1000);
+  }
+
+  function playerIn(m, acc) {
+    var list = (m && m.players) || [];
+    var target = String(acc || "");
+    for (var i = 0; i < list.length; i++) {
+      if (String(list[i].account_id) === target) return list[i];
+    }
+    return null;
+  }
+
+  function metaEntry(m, me, id, heroes) {
+    if (!m) return null;
+    var mine = playerIn(m, me);
+    var mate = playerIn(m, id);
+    if (!mate) return null;
+    var side = mine && mine.team === mate.team ? "with" : "vs";
+    var win = -1;
+    if (mine && m.winning_team) win = mine.team === m.winning_team ? 1 : 0;
+    return {
+      mid: String(m.match_id),
+      hero: heroes[String(mate.hero_id)] || "",
+      time: metaTime(m),
+      mode: metaMode(m),
+      side: side,
+      k: Number(mate.kills),
+      d: Number(mate.deaths),
+      a: Number(mate.assists),
+      yk: mine ? Number(mine.kills) : -1,
+      yd: mine ? Number(mine.deaths) : -1,
+      ya: mine ? Number(mine.assists) : -1,
+      win: win
+    };
   }
 
   function profile(me, id) {
     return Promise.all([
       loadStats(me),
-      withTimeout(loadHeroes().catch(function () { return {}; }), 5000, {}),
-      withTimeout(loadHistory(id).catch(function () { return {}; }), 6000, {}),
-      withTimeout(loadHistory(me).catch(function () { return {}; }), 6000, {})
+      withTimeout(loadHeroes().catch(function () { return {}; }), 5000, {})
     ]).then(function (all) {
       var stats = all[0];
       var heroes = all[1];
-      var hist = all[2];
-      var myHist = all[3];
       var m = stats.mates[id];
       var e = stats.enemies[id];
       var shared = {};
@@ -232,40 +272,28 @@
       }
       var ids = Object.keys(shared);
       ids.sort(function (a, b) { return Number(b) - Number(a); });
-      var out = [];
-      for (i = 0; i < ids.length && out.length < 3; i++) {
-        var mid = ids[i];
-        var h = hist[mid];
-        var yh = myHist[mid];
-        out.push({
-          mid: mid,
-          hero: h && heroes[String(h.hero_id)] ? heroes[String(h.hero_id)] : "",
-          time: h ? Number(h.start_time) || 0 : 0,
-          mode: modeName(h),
-          side: shared[mid],
-          k: h ? Number(h.player_kills) || 0 : -1,
-          d: h ? Number(h.player_deaths) || 0 : -1,
-          a: h ? Number(h.player_assists) || 0 : -1,
-          yk: yh ? Number(yh.player_kills) || 0 : -1,
-          yd: yh ? Number(yh.player_deaths) || 0 : -1,
-          ya: yh ? Number(yh.player_assists) || 0 : -1,
-          win: yh ? Number(yh.match_result) : -1
-        });
-      }
-      var rosters = loadRosters(me);
-      var prev = rosters.slice(0, -1);
-      var local = 0;
-      for (var r = 0; r < prev.length; r++) {
-        if (prev[r].ids && prev[r].ids.indexOf(String(id)) >= 0) local += 1;
-      }
-      return {
-        m: m ? m.m : 0,
-        e: e ? e.e : 0,
-        mw: m ? m.w : 0,
-        ew: e ? e.w : 0,
-        local: local,
-        list: out
-      };
+      var pick = ids.slice(0, 5);
+      return withTimeout(loadMetadata(pick).catch(function () { return {}; }), 8000, {}).then(function (meta) {
+        var out = [];
+        for (i = 0; i < pick.length && out.length < 3; i++) {
+          var entry = metaEntry(meta[pick[i]], me, id, heroes);
+          if (entry) out.push(entry);
+        }
+        var rosters = loadRosters(me);
+        var prev = rosters.slice(0, -1);
+        var local = 0;
+        for (var r = 0; r < prev.length; r++) {
+          if (prev[r].ids && prev[r].ids.indexOf(String(id)) >= 0) local += 1;
+        }
+        return {
+          m: m ? m.m : 0,
+          e: e ? e.e : 0,
+          mw: m ? m.w : 0,
+          ew: e ? e.w : 0,
+          local: local,
+          list: out
+        };
+      });
     });
   }
 
@@ -290,27 +318,33 @@
     return { mid: String(best), side: side };
   }
 
-  function lastShared(stats, id, hist, myHist, heroes) {
-    var best = bestShared(stats, id);
-    if (!best) return null;
-    var mid = best.mid;
-    var side = best.side;
-    var h = hist[mid];
-    var yh = myHist[mid];
-    return {
-      mid: mid,
-      side: side,
-      hero: h && heroes[String(h.hero_id)] ? heroes[String(h.hero_id)] : "",
-      k: h ? Number(h.player_kills) || 0 : -1,
-      d: h ? Number(h.player_deaths) || 0 : -1,
-      a: h ? Number(h.player_assists) || 0 : -1,
-      win: yh ? Number(yh.match_result) : -1,
-      time: h ? Number(h.start_time) || 0 : 0,
-      mode: modeName(h)
-    };
+  function readSession(me, ids) {
+    var cached = readJson(SESSION_KEY, SESSION_TTL);
+    if (!cached || String(cached.me || "") !== String(me)) return null;
+    if (!cached.ids || !cached.list) return null;
+    var allowed = {};
+    for (var i = 0; i < cached.ids.length; i++) allowed[String(cached.ids[i])] = true;
+    for (var j = 0; j < ids.length; j++) {
+      if (!allowed[String(ids[j])]) return null;
+    }
+    var want = {};
+    for (var k = 0; k < ids.length; k++) want[String(ids[k])] = true;
+    var out = [];
+    for (var n = 0; n < cached.list.length; n++) {
+      var entry = cached.list[n];
+      if (entry && want[String(entry.id)]) out.push(entry);
+    }
+    return out;
+  }
+
+  function saveSession(me, ids, list) {
+    writeJson(SESSION_KEY, { me: String(me), ids: ids, list: list });
   }
 
   function roster(me, players, fresh) {
+    var rosterIds = uniqueIds(players);
+    var session = readSession(me, rosterIds);
+    if (session) return Promise.resolve(session);
     loadHeroes().catch(function () { });
     return loadStats(me, !!fresh).then(function (stats) {
       var out = [];
@@ -390,26 +424,44 @@
       out.sort(function (x, y) { return (y.m + y.e) - (x.m + x.e); });
 
       var top = out.slice(0, 6);
-      if (!top.length) return out;
+      if (!top.length) {
+        saveSession(me, ids, out);
+        return out;
+      }
+
+      var wanted = [];
+      var bestById = {};
+      for (var t = 0; t < top.length; t++) {
+        var best = bestShared(stats, top[t].id);
+        if (!best) continue;
+        bestById[top[t].id] = best;
+        if (wanted.indexOf(best.mid) < 0) wanted.push(best.mid);
+      }
+
       return Promise.all([
-        withTimeout(loadHistory(me, !!fresh).catch(function () { return {}; }), 8000, {}),
-        withTimeout(loadHeroes().catch(function () { return {}; }), 8000, {})
+        withTimeout(loadHeroes().catch(function () { return {}; }), 8000, {}),
+        withTimeout(loadMetadata(wanted).catch(function () { return {}; }), 8000, {})
       ]).then(function (base) {
-        var myHist = base[0] || {};
-        var heroes = base[1] || {};
-        return Promise.all(top.map(function (entry) {
-          var best = bestShared(stats, entry.id);
-          if (!best) return null;
-          return withTimeout(loadHistory(entry.id).catch(function () { return {}; }), 8000, {})
-            .then(function (hist) {
-              if (hist[best.mid]) return hist;
-              return loadHistory(entry.id, true).catch(function () { return hist || {}; });
-            })
-            .then(function (hist) {
-              var last = lastShared(stats, entry.id, hist || {}, myHist, heroes);
-              if (last) entry.last = last;
-            });
-        })).then(function () { return out; });
+        var heroes = base[0] || {};
+        var meta = base[1] || {};
+        for (var k = 0; k < top.length; k++) {
+          var entry = top[k];
+          var choice = bestById[entry.id];
+          if (!choice) continue;
+          var item = metaEntry(meta[choice.mid], me, entry.id, heroes);
+          if (!item) continue;
+          entry.last = {
+            mid: item.mid,
+            side: item.side,
+            hero: item.hero,
+            k: item.k,
+            d: item.d,
+            a: item.a,
+            win: item.win
+          };
+        }
+        saveSession(me, ids, out);
+        return out;
       });
     });
   }
