@@ -399,9 +399,10 @@
         var heroes = base[1] || {};
         return Promise.all(top.map(function (entry) {
           var best = bestShared(stats, entry.id);
+          if (!best) return null;
           return withTimeout(loadHistory(entry.id).catch(function () { return {}; }), 8000, {})
             .then(function (hist) {
-              if (best && hist[best.mid]) return hist;
+              if (hist[best.mid]) return hist;
               return loadHistory(entry.id, true).catch(function () { return hist || {}; });
             })
             .then(function (hist) {
