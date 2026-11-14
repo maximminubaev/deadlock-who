@@ -417,6 +417,7 @@
   function respond() {
     var q = parseHash();
     if (!q || !q.q) { title("idle"); return; }
+    if (q.q === "idle") { title("idle"); return; }
     if (busy) { pending = true; return; }
     busy = true;
     pending = false;
